@@ -23,8 +23,12 @@ def main():
 
     ctx = Context(corpus, light, fit)
     del corpus, light
+    # эмбеддинги two-tower модели, обученной на всём train (python embed.py full)
+    ctx.set_embeddings(np.load(f"{WORK}/emb_items_full.npy"),
+                       pd.read_parquet(f"{WORK}/emb_items_full_ids.parquet").item_id.values)
+    q_emb = np.load(f"{WORK}/emb_queries_full.npy")
 
-    df = generate(ctx, q)
+    df = generate(ctx, q, q_emb)
     df = add_query_relative_features(df)
     model = lgb.Booster(model_file=f"{WORK}/ranker.txt")
     df["score"] = model.predict(df[model.feature_name()])

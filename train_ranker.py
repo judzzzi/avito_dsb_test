@@ -30,7 +30,7 @@ PARAMS = dict(
     num_threads=2,
     verbose=-1,
 )
-N_ROUNDS = 400
+N_ROUNDS = 250
 
 
 def recall50(df, score, nrel: pd.Series):

@@ -13,6 +13,7 @@
   tr    — BM25 заголовков по «переводу» терминов запроса (словарь из логов) top 100
   hist  — объявления, которые выбирали по этому/похожим запросам в логах top 50
   mc    — популярные объявления наиболее вероятной микрокатегории        top 50
+  emb   — косинус плотных эмбеддингов two-tower модели (embed.py)        top 100
 """
 import numpy as np
 import pandas as pd
@@ -21,7 +22,8 @@ import scipy.sparse as sp
 from common import normalize
 
 LAMBDA_LOC = 2.0
-K_SRC = {"all": 200, "title": 100, "prof": 100, "tr": 100, "hist": 50, "mc": 50}
+K_SRC = {"all": 200, "title": 100, "prof": 100, "tr": 100, "hist": 50, "mc": 50, "emb": 100}
+ALPHA_EMB = 40.0  # вес косинуса эмбеддингов относительно лог-prior локации (подобран на валидации)
 PROF_TERMS = 30
 
 
@@ -73,20 +75,21 @@ def _row_normalize(M):
     return sp.diags(1.0 / np.maximum(s, 1e-9)).dot(M).tocsr()
 
 
-def generate(ctx, queries: pd.DataFrame, batch_size: int = 250, verbose=True):
+def generate(ctx, queries: pd.DataFrame, q_emb: np.ndarray, batch_size: int = 250, verbose=True):
     """queries: DataFrame с колонками search_query, q_stem, search_location_id,
-    search_infm_params_text. Возвращает DataFrame кандидатов с признаками."""
+    search_infm_params_text; q_emb — эмбеддинги запросов (в том же порядке),
+    ctx.emb — эмбеддинги корпуса. Возвращает DataFrame кандидатов с признаками."""
     out = []
     n = len(queries)
     for start in range(0, n, batch_size):
         qb = queries.iloc[start : start + batch_size]
-        out.append(_generate_batch(ctx, qb, start))
+        out.append(_generate_batch(ctx, qb, start, q_emb[start : start + batch_size]))
         if verbose:
             print(f"[cands] {min(start + batch_size, n)}/{n}", flush=True)
     return pd.concat(out, ignore_index=True)
 
 
-def _generate_batch(ctx, qb, offset):
+def _generate_batch(ctx, qb, offset, qe):
     B = len(qb)
     stems = qb.q_stem.fillna("").values
     qnorm = [normalize(x) for x in qb.search_query.values]
@@ -122,6 +125,9 @@ def _generate_batch(ctx, qb, offset):
     NBe.data = (NBe.data > 0.99).astype(np.float32)
     NBe.eliminate_zeros()
     H_exact = (NBe @ ctx.fq_item).tocsr()
+
+    # --- плотные эмбеддинги: косинус запроса со всеми объявлениями (B x N) ---
+    SIM = qe @ ctx.emb.T
 
     for M in (S_title, S_par, S_desc, S_all, C_title, C_all, S_prof, S_tr, H, H_exact):
         M.sort_indices()
@@ -159,6 +165,8 @@ def _generate_batch(ctx, qb, offset):
         if pmc_row.sum() > 0:
             sc = np.log(pmc + 1e-3) + LAMBDA_LOC * lp + 0.1 * ctx.reviews + 0.5 * fb
             src["mc"] = _topk(np.arange(ctx.N), sc, K_SRC["mc"])
+        sim = SIM[i]
+        src["emb"] = _topk(np.arange(ctx.N), ALPHA_EMB * sim + LAMBDA_LOC * lp + 0.5 * fb, K_SRC["emb"])
         if not src:
             # совсем пустой запрос: берём локально популярные объявления
             sc = LAMBDA_LOC * lp + 0.1 * ctx.reviews
@@ -178,6 +186,8 @@ def _generate_batch(ctx, qb, offset):
         f["bm_all"] = _lookup(S_all, i, cand)
         f["bm_prof"] = _lookup(S_prof, i, cand)
         f["bm_tr"] = _lookup(S_tr, i, cand)
+        f["emb_sim"] = sim[cand]
+        f["emb_sim_max"] = np.full(m, sim.max(), np.float32)   # насколько хорошо запрос вообще «ложится» в корпус
         qi_idf = max(q_idf_all[i], 1e-6)
         f["cov_title"] = _lookup(C_title, i, cand) / qi_idf
         f["cov_all"] = _lookup(C_all, i, cand) / qi_idf
@@ -218,11 +228,13 @@ def _generate_batch(ctx, qb, offset):
 def add_query_relative_features(df: pd.DataFrame) -> pd.DataFrame:
     """Признаки относительно других кандидатов того же запроса: ранги и доли от максимума."""
     g = df.groupby("qi", sort=False)
-    for c in ["bm_title", "bm_all", "bm_prof", "bm_tr", "bm_desc", "pmc", "loc_logp", "reviews"]:
+    for c in ["bm_title", "bm_all", "bm_prof", "bm_tr", "bm_desc", "emb_sim", "pmc", "loc_logp", "reviews"]:
         mx = g[c].transform("max")
         df[c + "_rel"] = (df[c] / mx.where(mx > 0, 1)).astype(np.float32)
         df[c + "_rank"] = g[c].rank(ascending=False, method="min").astype(np.float32)
     # «быстрый» скор источника all и его ранг — хороший ориентир для ранкера
     df["base"] = (df.bm_all + 2.0 * df.loc_logp).astype(np.float32)
+    df["emb_base"] = (ALPHA_EMB * df.emb_sim + 2.0 * df.loc_logp).astype(np.float32)
+    df["emb_base_rank"] = df.groupby("qi", sort=False)["emb_base"].rank(ascending=False, method="min").astype(np.float32)
     df["base_rank"] = df.groupby("qi", sort=False)["base"].rank(ascending=False, method="min").astype(np.float32)
     return df

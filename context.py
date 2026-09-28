@@ -325,6 +325,11 @@ class Context:
         self._log(f"query log built: {len(qtexts)} texts, corpus items with history: "
                   f"{(self.item_hist_cnt > 0).sum()}")
 
+    def set_embeddings(self, E: np.ndarray, ids):
+        """Плотные эмбеддинги корпуса (из embed.py), выравниваем по порядку ctx.item_ids."""
+        row = pd.Series(np.arange(len(ids)), index=ids)
+        self.emb = np.ascontiguousarray(E[row.loc[self.item_ids].values])
+
     def neighbors(self, queries_norm, k=30, min_sim=0.25):
         """Разреженная матрица (запросы x тексты логов) с косинусной близостью top-k соседей."""
         Q = self.q_vec_char.transform(queries_norm).tocsr()

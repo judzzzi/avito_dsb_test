@@ -35,9 +35,13 @@ def main(split_id: int = 0):
 
     ctx = Context(corpus, light, fit)
     del corpus, light
+    # эмбеддинги two-tower модели, обученной на fit-части (python embed.py val)
+    ctx.set_embeddings(np.load(f"{WORK}/emb_items_val.npy"),
+                       pd.read_parquet(f"{WORK}/emb_items_val_ids.parquet").item_id.values)
+    q_emb = np.load(f"{WORK}/emb_queries_val.npy")
     print("context: %.0fs" % (time.time() - t0), flush=True)
 
-    df = generate(ctx, val)
+    df = generate(ctx, val, q_emb)
     df = add_query_relative_features(df)
     # метки
     id2c = pd.Series(np.arange(ctx.N), index=ctx.item_ids)
@@ -52,7 +56,7 @@ def main(split_id: int = 0):
     hit = df.groupby("qi").label.sum().reindex(range(len(val)), fill_value=0).values
     print("candidates per query: %.0f" % df.groupby("qi").size().mean())
     print("candidate recall (ceiling): %.4f" % np.mean(hit / nrel))
-    for name in ["all", "title", "prof", "tr", "hist", "mc"]:
+    for name in ["all", "title", "prof", "tr", "hist", "mc", "emb"]:
         h = df[df["src_" + name] == 1].groupby("qi").label.sum().reindex(range(len(val)), fill_value=0).values
         print(f"  source {name}: recall {np.mean(h / nrel):.4f}")
     nrel_s = val.relevant.map(len)
